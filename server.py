@@ -19,6 +19,8 @@ Authentication modes:
 import os
 import json
 import logging
+from decimal import ROUND_HALF_UP, Decimal
+from enum import Enum
 from typing import Optional
 
 import httpx
@@ -26,6 +28,93 @@ from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
 load_dotenv()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Motor fiscal determinista — IVA Ecuador (Kushki)
+# ─────────────────────────────────────────────────────────────────────
+# El LLM NUNCA calcula impuestos ni construye el dict `amount`.
+# Solo pasa `monto` + `tipo_monto`. Este módulo produce el objeto amount
+# exacto que espera la API de Kushki: {subtotalIva, subtotalIva0, iva, ice, currency}.
+# ─────────────────────────────────────────────────────────────────────
+
+class TipoMonto(str, Enum):
+    """Indica si el monto dado por el usuario incluye IVA o es la base imponible."""
+    SUBTOTAL      = "subtotal"       # el usuario dio la base SIN IVA  (default)
+    TOTAL_CON_IVA = "total_con_iva"  # el usuario dio el total CON IVA incluido
+
+
+_TWO = Decimal("0.01")
+
+
+def _iva_rate() -> Decimal:
+    """Lee IVA_EC_PERCENTAGE del entorno. Fallback: 0.15 (15%)."""
+    raw = os.environ.get("IVA_EC_PERCENTAGE", "0.15")
+    try:
+        rate = Decimal(raw)
+        if not (Decimal(0) < rate <= Decimal(1)):
+            raise ValueError()
+        return rate
+    except Exception:
+        raise ValueError(
+            f"IVA_EC_PERCENTAGE inválido: {raw!r}. "
+            "Debe ser un decimal entre 0 y 1, ej. '0.15' para 15%."
+        )
+
+
+def _r2(v: Decimal) -> Decimal:
+    """Redondeo estricto a 2 decimales (ROUND_HALF_UP)."""
+    return v.quantize(_TWO, rounding=ROUND_HALF_UP)
+
+
+def _calcular_monto_kushki(
+    monto: float, tipo: TipoMonto, currency: str = "USD"
+) -> dict:
+    """Construye el objeto `amount` que exige la API de Kushki.
+
+    Kushki espera un dict con floats:
+        {subtotalIva, subtotalIva0, iva, ice, currency}
+    donde subtotalIva = base gravada (sin IVA), subtotalIva0 = base cero.
+    En el flujo estándar gravado, subtotalIva0 e ice son siempre 0.
+
+    Args:
+        monto:    El valor exacto dado por el usuario (en USD).
+        tipo:     TipoMonto.SUBTOTAL      → monto es la base sin IVA.
+                  TipoMonto.TOTAL_CON_IVA → monto es el total ya con IVA.
+        currency: Código de moneda (default "USD").
+
+    Returns:
+        dict listo para usar como `amount` en create_card_charge / create_cash_charge.
+
+    Ejemplos:
+        _calcular_monto_kushki(30.0, SUBTOTAL)
+            → {subtotalIva: 30.0, subtotalIva0: 0.0, iva: 4.5, ice: 0.0, currency: 'USD'}
+        _calcular_monto_kushki(30.0, TOTAL_CON_IVA)
+            → {subtotalIva: 26.09, subtotalIva0: 0.0, iva: 3.91, ice: 0.0, currency: 'USD'}
+    """
+    if monto <= 0:
+        raise ValueError(f"monto debe ser > 0. Recibido: {monto}")
+    rate = _iva_rate()
+    d = Decimal(str(monto))
+
+    if tipo == TipoMonto.TOTAL_CON_IVA:
+        total    = _r2(d)
+        subtotal = _r2(d / (1 + rate))
+        iva      = _r2(total - subtotal)
+    else:  # SUBTOTAL
+        subtotal = _r2(d)
+        iva      = _r2(d * rate)
+
+    return {
+        "subtotalIva":  float(subtotal),
+        "subtotalIva0": 0.0,
+        "iva":          float(iva),
+        "ice":          0.0,
+        "currency":     currency,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -59,12 +148,17 @@ mcp = FastMCP(
         "MCP server for Kushki payment gateway. Supports card payments, "
         "cash payments (efectivo), bank transfers, and subscriptions. "
         "Credentials are loaded from KUSHKI_PUBLIC_KEY / KUSHKI_PRIVATE_KEY env vars. "
-        "Authentication keys are read from environment variables. "
         "TYPICAL CARD FLOW: create_card_token → create_card_charge. "
         "TYPICAL CASH FLOW: create_cash_token → create_cash_charge. "
+        "MONETARY INPUT RULES (agent must follow strictly): "
+        "  · Pass `monto` (float) with the EXACT number the user stated. "
+        "  · Pass `tipo_monto`='subtotal' if the amount is WITHOUT IVA (default). "
+        "  · Pass `tipo_monto`='total_con_iva' if the amount ALREADY INCLUDES IVA. "
+        "  · NEVER build the amount dict or calculate IVA yourself. "
+        "  · The server builds {subtotalIva, subtotalIva0, iva, ice, currency} internally. "
         "ENVIRONMENT: set KUSHKI_ENVIRONMENT=production for live payments "
         "(default is sandbox at api-uat.kushkipagos.com). "
-        "Amount object schema: {subtotalIva, subtotalIva0, iva, ice, currency}."
+        "The IVA rate is read from IVA_EC_PERCENTAGE env var (default 15%)."
     ))
 
 
@@ -79,8 +173,7 @@ def _build_headers(auth_type: str = "private") -> dict[str, str]:
 
     if not resolved_public or not resolved_private:
         raise RuntimeError(
-            "Both public_key and private_key are required for Kushki. "
-            "Pass them as tool parameters."
+            "Both KUSHKI_PUBLIC_KEY and KUSHKI_PRIVATE_KEY environment variables are required."
         )
     headers = {"Content-Type": "application/json"}
     if auth_type == "public":
@@ -162,8 +255,6 @@ async def create_card_token(    card: dict,
     consumed immediately with create_card_charge.
 
     REQUIRED PARAMETERS:
-      public_key (str): Kushki Public Merchant-Id for the account to use.
-      private_key (str): Kushki Private Merchant-Id for the account to use.
       card (dict): Card data object with these exact fields:
                    {
                      "name": "JOHN DOE",          # Cardholder name as printed on card
@@ -182,7 +273,6 @@ async def create_card_token(    card: dict,
 
     EXAMPLE CALL:
       create_card_token(
-          public_key="pub_xxx", private_key="prv_xxx",
           card={"name": "JOHN DOE", "number": "4111111111111111",
                 "expiryMonth": "12", "expiryYear": "28", "cvv": "123"},
           totalAmount=11.50
@@ -200,44 +290,51 @@ async def create_card_token(    card: dict,
 
 
 @mcp.tool()
-async def create_card_charge(    token: str,
-    amount: dict,
+async def create_card_charge(
+    token: str,
+    monto: float,
+    tipo_monto: TipoMonto = TipoMonto.SUBTOTAL,
+    currency: str = "USD",
     fullResponse: bool = True) -> dict:
     """⚠️ MUTATION — Process a card charge using a token — POST /card/v1/charges.
 
     Use this tool as the SECOND step in the card payment flow, after
     create_card_token. Uses the PRIVATE key.
 
+    MONETARY INPUT (agent MUST follow this contract):
+      monto (float): The EXACT amount the user stated — pass it verbatim, no rounding.
+      tipo_monto (enum):
+        · "subtotal"      → monto is the taxable base WITHOUT IVA (default).
+        · "total_con_iva" → monto is the final price ALREADY INCLUDING IVA.
+
+    ⚠️ DO NOT build the amount dict or calculate subtotalIva/iva yourself.
+       The server builds {subtotalIva, subtotalIva0, iva, ice, currency} internally.
+
     REQUIRED PARAMETERS:
-      public_key (str): Kushki Public Merchant-Id for the account to use.
-      private_key (str): Kushki Private Merchant-Id for the account to use.
       token (str): Single-use token returned by create_card_token.
-      amount (dict): Amount breakdown object:
-                     {
-                       "subtotalIva": 10.00,    # ⚠️ TAXABLE BASE (Base Imponible). NOT Total Amount.
-                       "subtotalIva0": 0.00,    # ⚠️ ZERO-RATE BASE (Base Cero).
-                       "iva": 1.50,             # VAT amount
-                       "ice": 0.00,             # ICE tax (usually 0)
-                       "currency": "USD"
-                     }
+      monto (float): Amount exactly as stated by the user. Example: 30.0
 
     OPTIONAL PARAMETERS:
+      tipo_monto (str, default="subtotal"): "subtotal" | "total_con_iva".
+      currency (str, default="USD"): Currency code.
       fullResponse (bool, default=True): If True, returns complete transaction details.
 
     RETURNS:
       {"ticketNumber": str, "status": str, "authorizationCode": str,
        "cardType": str, "cardBrand": str, "cardMasked": str}
 
-    EXAMPLE CALL:
-      create_card_charge(
-          public_key="pub_xxx", private_key="prv_xxx",
-          token="kjsdfh87324...",
-          amount={"subtotalIva": 10.00, "subtotalIva0": 0, "iva": 1.50, "ice": 0, "currency": "USD"}
-      )
+    EXAMPLE CALLS:
+      create_card_charge(token="kjsdfh87324...", monto=30.0, tipo_monto="subtotal")
+      create_card_charge(token="kjsdfh87324...", monto=34.50, tipo_monto="total_con_iva")
     """
+    amount_dict = _calcular_monto_kushki(monto, tipo_monto, currency)
+    logger.info(
+        "[create_card_charge] monto=%.2f tipo=%s → subtotalIva=%.2f iva=%.2f",
+        monto, tipo_monto.value, amount_dict["subtotalIva"], amount_dict["iva"],
+    )
     payload = {
         "token": token,
-        "amount": amount,
+        "amount": amount_dict,
         "fullResponse": fullResponse,
     }
     return await _kushki_request(
@@ -255,8 +352,6 @@ async def void_or_refund_charge(    ticketNumber: str,
     Uses the PRIVATE key.
 
     REQUIRED PARAMETERS:
-      public_key (str): Kushki Public Merchant-Id for the account to use.
-      private_key (str): Kushki Private Merchant-Id for the account to use.
       ticketNumber (str): The ticket number returned by create_card_charge.
                           Example: "200000000351"
 
@@ -269,10 +364,8 @@ async def void_or_refund_charge(    ticketNumber: str,
       {"status": str, "message": str}  — confirmation of the void/refund.
 
     EXAMPLE CALLS:
-      void_or_refund_charge(public_key="pub_xxx", private_key="prv_xxx",
-                            ticketNumber="200000000351")  # Full void
-      void_or_refund_charge(public_key="pub_xxx", private_key="prv_xxx",
-                            ticketNumber="200000000351",
+      void_or_refund_charge(ticketNumber="200000000351")  # Full void
+      void_or_refund_charge(ticketNumber="200000000351",
                             amount={"subtotalIva": 5.00, ...})  # Partial refund
     """
     payload = {"amount": amount} if amount else None
@@ -296,8 +389,6 @@ async def create_cash_token(    name: str,
     to generate a reference code the customer pays at a physical agent.
 
     REQUIRED PARAMETERS:
-      public_key (str): Kushki Public Merchant-Id for the account to use.
-      private_key (str): Kushki Private Merchant-Id for the account to use.
       name (str): Customer first name. Example: "Juan"
       lastName (str): Customer last name. Example: "Pérez"
       identification (str): Customer cedula or RUC. Example: "0912345678"
@@ -312,7 +403,6 @@ async def create_cash_token(    name: str,
 
     EXAMPLE CALL:
       create_cash_token(
-          public_key="pub_xxx", private_key="prv_xxx",
           name="Juan", lastName="Pérez", identification="0912345678",
           email="juan@example.com", totalAmount=25.00
       )
@@ -332,8 +422,11 @@ async def create_cash_token(    name: str,
 
 
 @mcp.tool()
-async def create_cash_charge(    token: str,
-    amount: dict,
+async def create_cash_charge(
+    token: str,
+    monto: float,
+    tipo_monto: TipoMonto = TipoMonto.SUBTOTAL,
+    currency: str = "USD",
     fullResponse: bool = True) -> dict:
     """⚠️ MUTATION — Generate a cash payment reference code — POST /cash/v1/charges.
 
@@ -341,33 +434,39 @@ async def create_cash_charge(    token: str,
     Creates a PIN or barcode the customer uses to pay at a physical agent (e.g. bank).
     Uses the PRIVATE key.
 
+    MONETARY INPUT (agent MUST follow this contract):
+      monto (float): The EXACT amount the user stated — pass it verbatim, no rounding.
+      tipo_monto (enum):
+        · "subtotal"      → monto is the taxable base WITHOUT IVA (default).
+        · "total_con_iva" → monto is the final price ALREADY INCLUDING IVA.
+
+    ⚠️ DO NOT build the amount dict or calculate subtotalIva/iva yourself.
+       The server builds {subtotalIva, subtotalIva0, iva, ice, currency} internally.
+
     REQUIRED PARAMETERS:
-      public_key (str): Kushki Public Merchant-Id for the account to use.
-      private_key (str): Kushki Private Merchant-Id for the account to use.
       token (str): Cash token returned by create_cash_token.
-      amount (dict): Amount breakdown:
-                     {
-                       "subtotalIva": 0.00,     # ⚠️ TAXABLE BASE (Base Imponible). NOT Total.
-                       "subtotalIva0": 25.00,   # ⚠️ ZERO-RATE BASE (Base Cero).
-                       "iva": 0, "ice": 0, "currency": "USD"
-                     }
+      monto (float): Amount exactly as stated by the user. Example: 25.0
 
     OPTIONAL PARAMETERS:
+      tipo_monto (str, default="subtotal"): "subtotal" | "total_con_iva".
+      currency (str, default="USD"): Currency code.
       fullResponse (bool, default=True): If True, returns complete charge details.
 
     RETURNS:
       {"pincashCode": str, "expirationDate": str, "ticketNumber": str}
 
-    EXAMPLE CALL:
-      create_cash_charge(
-          public_key="pub_xxx", private_key="prv_xxx",
-          token="abc123token",
-          amount={"subtotalIva": 0, "subtotalIva0": 25.00, "iva": 0, "ice": 0, "currency": "USD"}
-      )
+    EXAMPLE CALLS:
+      create_cash_charge(token="abc123token", monto=25.0, tipo_monto="subtotal")
+      create_cash_charge(token="abc123token", monto=28.75, tipo_monto="total_con_iva")
     """
+    amount_dict = _calcular_monto_kushki(monto, tipo_monto, currency)
+    logger.info(
+        "[create_cash_charge] monto=%.2f tipo=%s → subtotalIva=%.2f iva=%.2f",
+        monto, tipo_monto.value, amount_dict["subtotalIva"], amount_dict["iva"],
+    )
     payload = {
         "token": token,
-        "amount": amount,
+        "amount": amount_dict,
         "fullResponse": fullResponse,
     }
     return await _kushki_request(
@@ -390,8 +489,6 @@ async def create_transfer_token(    bankId: str,
     Uses the PUBLIC key. The resulting token is used with init_transfer.
 
     REQUIRED PARAMETERS:
-      public_key (str): Kushki Public Merchant-Id for the account to use.
-      private_key (str): Kushki Private Merchant-Id for the account to use.
       bankId (str): Bank code for the transfer destination. Example: "1022"
       userType (str): Customer type. "0"=Natural person, "1"=Legal entity.
       documentType (str): ID document type. Example: "CC", "NIT", "CE"
@@ -412,7 +509,6 @@ async def create_transfer_token(    bankId: str,
 
     EXAMPLE CALL:
       create_transfer_token(
-          public_key="pub_xxx", private_key="prv_xxx",
           bankId="1022", userType="0", documentType="CC",
           documentNumber="0912345678", paymentDescription="Invoice payment",
           amount={"amountDetails": {"subtotalIva": 0, "subtotalIva0": 100, "iva": 0, "ice": 0}}
@@ -444,8 +540,6 @@ async def init_transfer(    token: str,
     Uses the PRIVATE key.
 
     REQUIRED PARAMETERS:
-      public_key (str): Kushki Public Merchant-Id for the account to use.
-      private_key (str): Kushki Private Merchant-Id for the account to use.
       token (str): Transfer token returned by create_transfer_token.
       amount (dict): Amount breakdown:
                      {
@@ -463,7 +557,6 @@ async def init_transfer(    token: str,
 
     EXAMPLE CALL:
       init_transfer(
-          public_key="pub_xxx", private_key="prv_xxx",
           token="transferToken123",
           amount={"subtotalIva": 0, "subtotalIva0": 100.00, "iva": 0, "ice": 0, "currency": "USD"}
       )
@@ -493,8 +586,6 @@ async def create_subscription(    token: str,
     Uses the PRIVATE key.
 
     REQUIRED PARAMETERS:
-      public_key (str): Kushki Public Merchant-Id for the account to use.
-      private_key (str): Kushki Private Merchant-Id for the account to use.
       token (str): Card token from create_card_token.
       planName (str): Name of the subscription plan. Example: "Monthly Premium"
       periodicity (str): Billing frequency. "monthly" | "yearly" | "weekly"
@@ -514,7 +605,6 @@ async def create_subscription(    token: str,
 
     EXAMPLE CALL:
       create_subscription(
-          public_key="pub_xxx", private_key="prv_xxx",
           token="cardToken123", planName="Monthly Premium", periodicity="monthly",
           amount={"subtotalIva": 10, "subtotalIva0": 0, "iva": 1.50, "ice": 0, "currency": "USD"},
           startDate="2025-02-01"
@@ -543,8 +633,6 @@ async def get_charge_status(    ticketNumber: str) -> dict:
     Uses the PRIVATE key.
 
     REQUIRED PARAMETERS:
-      public_key (str): Kushki Public Merchant-Id for the account to use.
-      private_key (str): Kushki Private Merchant-Id for the account to use.
       ticketNumber (str): Ticket number returned by create_card_charge,
                           create_cash_charge, or init_transfer.
                           Example: "200000000351"
@@ -554,8 +642,7 @@ async def get_charge_status(    ticketNumber: str) -> dict:
        "cardBrand": str, "cardMasked": str, "responseText": str}
 
     EXAMPLE CALL:
-      get_charge_status(public_key="pub_xxx", private_key="prv_xxx",
-                        ticketNumber="200000000351")
+      get_charge_status(ticketNumber="200000000351")
     """
     return await _kushki_request(
         "GET", f"/v1/charges/{ticketNumber}",
