@@ -1,0 +1,358 @@
+openapi: 3.0.0
+info:
+  title: API Kushki Pagos Completa
+  description: Especificación completa de Kushki para integraciones MCP. Incluye pagos con Tarjeta, Efectivo (Cash), Transferencias Bancarias, Suscripciones y Consultas de estado. Define explícitamente el uso de la Llave Pública para tokens y Llave Privada para cargos.
+  version: 1.1.0
+servers:
+  - url: https://api.kushkipagos.com
+    description: Servidor de Producción Kushki
+  - url: https://api-uat.kushkipagos.com
+    description: Servidor de Pruebas (UAT / Sandbox)
+security: []
+paths:
+  # ==========================================
+  # TARJETAS DE CRÉDITO/DÉBITO
+  # ==========================================
+  /card/v1/tokens:
+    post:
+      summary: Tokenizar Tarjeta de Crédito/Débito
+      description: Genera un token seguro a partir de los datos de la tarjeta. DEBE usarse la Llave Pública.
+      operationId: createCardToken
+      security:
+        - PublicKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CardTokenRequest'
+      responses:
+        '201':
+          description: Token generado exitosamente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+
+  /card/v1/charges:
+    post:
+      summary: Procesar Cargo a Tarjeta
+      description: Realiza el débito usando un token generado previamente. DEBE usarse la Llave Privada.
+      operationId: createCardCharge
+      security:
+        - PrivateKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChargeRequest'
+      responses:
+        '201':
+          description: Cargo aprobado exitosamente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChargeResponse'
+
+  /card/v1/charges/{ticketNumber}:
+    delete:
+      summary: Anular o Reembolsar Cargo de Tarjeta
+      description: Anula un cargo o genera un reembolso. DEBE usarse la Llave Privada.
+      operationId: voidOrRefundCharge
+      security:
+        - PrivateKeyAuth: []
+      parameters:
+        - name: ticketNumber
+          in: path
+          required: true
+          description: El número de ticket devuelto en la creación del cargo.
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount:
+                  $ref: '#/components/schemas/AmountDetails'
+      responses:
+        '200':
+          description: Transacción anulada/reembolsada con éxito.
+
+  # ==========================================
+  # PAGOS EN EFECTIVO (CASH)
+  # ==========================================
+  /cash/v1/tokens:
+    post:
+      summary: Tokenizar Pago en Efectivo
+      description: Prepara los datos del cliente para un pago en efectivo. DEBE usarse la Llave Pública.
+      operationId: createCashToken
+      security:
+        - PublicKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CashTokenRequest'
+      responses:
+        '201':
+          description: Token de efectivo generado exitosamente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+
+  /cash/v1/charges:
+    post:
+      summary: Generar Referencia de Pago en Efectivo
+      description: Crea un código de pago (PIN) para que el cliente pague en un punto físico. DEBE usarse la Llave Privada.
+      operationId: createCashCharge
+      security:
+        - PrivateKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChargeRequest'
+      responses:
+        '201':
+          description: Referencia de pago generada exitosamente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CashChargeResponse'
+
+  # ==========================================
+  # TRANSFERENCIAS BANCARIAS
+  # ==========================================
+  /transfer/v1/tokens:
+    post:
+      summary: Tokenizar Transferencia Bancaria
+      description: Prepara la información bancaria para una transferencia (ej. PSE). DEBE usarse la Llave Pública.
+      operationId: createTransferToken
+      security:
+        - PublicKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferTokenRequest'
+      responses:
+        '201':
+          description: Token de transferencia generado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+
+  /transfer/v1/init:
+    post:
+      summary: Iniciar Transferencia Bancaria
+      description: Genera la URL de redirección al banco del cliente. DEBE usarse la Llave Privada.
+      operationId: initTransfer
+      security:
+        - PrivateKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChargeRequest'
+      responses:
+        '201':
+          description: Transferencia iniciada. Contiene la URL del banco.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferInitResponse'
+
+  # ==========================================
+  # SUSCRIPCIONES
+  # ==========================================
+  /subscriptions/v1/card:
+    post:
+      summary: Crear Suscripción con Tarjeta
+      description: Inscribe un token de tarjeta a un cobro recurrente. DEBE usarse la Llave Privada.
+      operationId: createSubscription
+      security:
+        - PrivateKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubscriptionRequest'
+      responses:
+        '201':
+          description: Suscripción creada exitosamente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionResponse'
+
+  # ==========================================
+  # CONSULTAS GLOBALES
+  # ==========================================
+  /v1/charges/{ticketNumber}:
+    get:
+      summary: Consultar Estado de Transacción
+      description: Recupera el estado actual de cualquier transacción (Aprobada, Declinada, Pendiente). DEBE usarse la Llave Privada.
+      operationId: getChargeStatus
+      security:
+        - PrivateKeyAuth: []
+      parameters:
+        - name: ticketNumber
+          in: path
+          required: true
+          description: Número de ticket de la transacción a consultar.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Detalles de la transacción.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChargeStatusResponse'
+
+components:
+  securitySchemes:
+    PublicKeyAuth:
+      type: apiKey
+      in: header
+      name: Public-Merchant-Id
+      description: Llave Pública de Kushki (usada solo para solicitar tokens).
+    PrivateKeyAuth:
+      type: apiKey
+      in: header
+      name: Private-Merchant-Id
+      description: Llave Privada de Kushki (usada para transacciones, consultas y reembolsos).
+
+  schemas:
+    AmountDetails:
+      type: object
+      required: [subtotalIva, subtotalIva0, iva, ice, currency]
+      properties:
+        subtotalIva: { type: number, format: float }
+        subtotalIva0: { type: number, format: float }
+        iva: { type: number, format: float }
+        ice: { type: number, format: float }
+        currency: { type: string, example: "USD" }
+
+    TokenResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: Token temporal válido por 15 minutos.
+
+    # -- SCHEMAS DE TARJETA --
+    CardTokenRequest:
+      type: object
+      required: [card, totalAmount, currency]
+      properties:
+        card:
+          type: object
+          required: [name, number, expiryMonth, expiryYear, cvv]
+          properties:
+            name: { type: string }
+            number: { type: string, description: "PAN de 16 dígitos" }
+            expiryMonth: { type: string, description: "MM" }
+            expiryYear: { type: string, description: "YY" }
+            cvv: { type: string }
+        totalAmount: { type: number, format: float }
+        currency: { type: string, default: "USD" }
+
+    # -- SCHEMAS DE EFECTIVO --
+    CashTokenRequest:
+      type: object
+      required: [name, lastName, identification, email, totalAmount, currency]
+      properties:
+        name: { type: string }
+        lastName: { type: string }
+        identification: { type: string, description: "Cédula o RUC" }
+        email: { type: string, format: email }
+        totalAmount: { type: number, format: float }
+        currency: { type: string, default: "USD" }
+
+    CashChargeResponse:
+      type: object
+      properties:
+        ticketNumber: { type: string }
+        pdfUrl: { type: string, format: uri, description: "URL con instrucciones de pago" }
+        pin: { type: string, description: "Código para dictar en la caja de cobro" }
+
+    # -- SCHEMAS DE TRANSFERENCIA --
+    TransferTokenRequest:
+      type: object
+      required: [bankId, userType, documentType, documentNumber, paymentDescription, amount, currency]
+      properties:
+        bankId: { type: string, description: "Código del banco" }
+        userType: { type: string, enum: ["0", "1"], description: "0: Persona, 1: Empresa" }
+        documentType: { type: string, enum: ["CC", "CE", "NIT", "RUC"] }
+        documentNumber: { type: string }
+        paymentDescription: { type: string }
+        amount: { $ref: '#/components/schemas/AmountDetails' }
+        currency: { type: string, default: "USD" }
+
+    TransferInitResponse:
+      type: object
+      properties:
+        ticketNumber: { type: string }
+        redirectUrl: { type: string, format: uri, description: "URL del banco para que el usuario complete el pago" }
+
+    # -- SCHEMAS GLOBALES Y SUSCRIPCIONES --
+    ChargeRequest:
+      type: object
+      required: [token, amount]
+      properties:
+        token: { type: string, description: "Token generado previamente (Tarjeta, Cash o Transfer)" }
+        amount: { $ref: '#/components/schemas/AmountDetails' }
+        fullResponse: { type: boolean, default: true }
+
+    ChargeResponse:
+      type: object
+      properties:
+        ticketNumber: { type: string }
+        details:
+          type: object
+          properties:
+            approvalCode: { type: string }
+            transactionReference: { type: string }
+            amount: { $ref: '#/components/schemas/AmountDetails' }
+
+    SubscriptionRequest:
+      type: object
+      required: [token, planName, periodicity, amount, startDate]
+      properties:
+        token: { type: string, description: "Token de la tarjeta" }
+        planName: { type: string, description: "Nombre del plan" }
+        periodicity: { type: string, enum: ["monthly", "yearly", "weekly"] }
+        amount: { $ref: '#/components/schemas/AmountDetails' }
+        startDate: { type: string, format: date, description: "Fecha del primer cobro" }
+        contactDetails:
+          type: object
+          properties:
+            email: { type: string }
+            firstName: { type: string }
+            lastName: { type: string }
+
+    SubscriptionResponse:
+      type: object
+      properties:
+        subscriptionId: { type: string }
+        ticketNumber: { type: string }
+
+    ChargeStatusResponse:
+      type: object
+      properties:
+        ticketNumber: { type: string }
+        status: { type: string, enum: ["APPROVAL", "DECLINED", "PENDING", "VOIDED"] }
+        transactionType: { type: string, description: "Ej: SALE, VOID, REFUND" }
+        amount: { $ref: '#/components/schemas/AmountDetails' }
