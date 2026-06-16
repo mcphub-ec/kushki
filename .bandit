@@ -1,2 +1,7 @@
 [bandit]
-skips = B101,B104,B108,B603,B607
+skips = B101,B108,B603,B607
+# B104 (bind 0.0.0.0) was previously skipped. Now the bind address is read
+# from MCP_HOST env var (default 0.0.0.0 only when MCP_HOST is unset, which
+# is the case in Docker). For local dev, set MCP_HOST=127.0.0.1 to bind
+# loopback only. Re-enabling B104 here so the lint check fires when
+# hardcoded 0.0.0.0 is reintroduced. (bd issue mcphub-wqy)

@@ -153,7 +153,7 @@ HTTP_TIMEOUT = 30.0
 # ─────────────────────────────────────────────────────────────────────
 mcp = FastMCP(
     "Kushki",
-    host="0.0.0.0",
+    host=os.getenv("MCP_HOST", "0.0.0.0"),
     instructions=(
         "MCP server for Kushki payment gateway. Supports card payments, "
         "cash payments (efectivo), bank transfers, and subscriptions. "
@@ -632,6 +632,10 @@ async def create_subscription(    token: str,
     The card will be automatically charged based on the periodicity.
     Uses the PRIVATE key.
 
+    `periodicity` must be one of: "monthly" | "yearly" | "weekly" — the server
+    validates this before sending the request to Kushki (which would otherwise
+    return a 400 with an opaque error). (bd issue mcphub-bpu)
+
     REQUIRED PARAMETERS:
       token (str): Card token from create_card_token.
       planName (str): Name of the subscription plan. Example: "Monthly Premium"
@@ -657,6 +661,11 @@ async def create_subscription(    token: str,
           startDate="2025-02-01"
       )
     """
+    _ALLOWED_PERIODICITY = ("monthly", "yearly", "weekly")
+    if periodicity not in _ALLOWED_PERIODICITY:
+        raise ValueError(
+            f"periodicity debe ser uno de {_ALLOWED_PERIODICITY}. Recibido: {periodicity!r}"
+        )
     payload = {
         "token": token,
         "planName": planName,
@@ -714,4 +723,4 @@ if __name__ == "__main__":
         app = mcp.streamable_http_app()
     else:
         raise ValueError(f"Unknown transport mode: {transport_mode}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host=os.getenv("MCP_HOST", "0.0.0.0"), port=port)
