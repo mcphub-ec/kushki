@@ -27,6 +27,9 @@ import httpx
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
+from mcp_common.security import validate_safe_url, validate_amount
+from mcp_common.logging_filter import install as install_logging_filter
+
 load_dotenv()
 
 
@@ -125,6 +128,7 @@ logging.basicConfig(
     format='{"time":"%(asctime)s", "level":"%(levelname)s", "name":"%(name)s", "message":"%(message)s"}',
 )
 logger = logging.getLogger("kushki-mcp")
+install_logging_filter()
 
 # ─────────────────────────────────────────────────────────────────────
 # Configuration
@@ -334,6 +338,7 @@ async def create_card_charge(
       create_card_charge(token="kjsdfh87324...", monto=34.50, tipo_monto="total_con_iva")
     """
     amount_dict = _calcular_monto_kushki(monto, tipo_monto, currency)
+    validate_amount(monto, "monto")
     logger.info(
         "[create_card_charge] monto=%.2f tipo=%s → subtotalIva=%.2f iva=%.2f",
         monto, tipo_monto.value, amount_dict["subtotalIva"], amount_dict["iva"],
@@ -351,11 +356,16 @@ async def create_card_charge(
 
 @mcp.tool()
 async def void_or_refund_charge(    ticketNumber: str,
-    amount: Optional[dict] = None) -> dict:
+    amount: Optional[dict] = None,
+    verify_status: bool = True) -> dict:
     """⚠️ MUTATION — Void or refund a card charge — DELETE /card/v1/charges/{ticketNumber}.
 
     Use this tool to cancel (void) a charge or issue a refund to a customer.
     Uses the PRIVATE key.
+
+    By default the server verifies the charge is in `approved` state before
+    attempting the void/refund. Pass `verify_status=False` to skip the
+    pre-check (not recommended unless verified externally).
 
     REQUIRED PARAMETERS:
       ticketNumber (str): The ticket number returned by create_card_charge.
@@ -365,20 +375,50 @@ async def void_or_refund_charge(    ticketNumber: str,
       amount (dict): Amount object for a PARTIAL refund. If omitted, the FULL
                      amount is voided/refunded.
                      Schema: {subtotalIva, subtotalIva0, iva, ice, currency}
+      verify_status (bool, default=True): Pre-check charge is approved.
 
     RETURNS:
-      {"status": str, "message": str}  — confirmation of the void/refund.
+      {"status": str, "message": str, "pre_check": dict | None}  — confirmation.
 
     EXAMPLE CALLS:
       void_or_refund_charge(ticketNumber="200000000351")  # Full void
       void_or_refund_charge(ticketNumber="200000000351",
                             amount={"subtotalIva": 5.00, ...})  # Partial refund
     """
+    pre_check: dict | None = None
+    if verify_status:
+        try:
+            status_resp = await _kushki_request(
+                "GET", f"/v1/charges/{ticketNumber}", auth_type="private"
+            )
+            pre_check = {
+                "ticketNumber": ticketNumber,
+                "approved": status_resp.get("approved"),
+                "responseText": status_resp.get("responseText"),
+            }
+            if not status_resp.get("approved"):
+                raise ValueError(
+                    f"No se puede anular/reembolsar el cargo {ticketNumber}: "
+                    f"estado actual no es aprobado (approved={status_resp.get('approved')}, "
+                    f"responseText={status_resp.get('responseText')!r}). "
+                    "Si confirmas que está aprobado, pasa verify_status=False."
+                )
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(
+                f"No se pudo verificar el estado del cargo {ticketNumber} antes de anular/reembolsar: {exc}. "
+                "Si confirmas que está aprobado, pasa verify_status=False para omitir la verificación."
+            ) from exc
+
     payload = {"amount": amount} if amount else None
-    return await _kushki_request(
+    result = await _kushki_request(
         "DELETE",
         f"/card/v1/charges/{ticketNumber}",
         auth_type="private", json_body=payload)
+    if pre_check is not None:
+        result["pre_check"] = pre_check
+    return result
 
 
 @mcp.tool()
@@ -466,6 +506,7 @@ async def create_cash_charge(
       create_cash_charge(token="abc123token", monto=28.75, tipo_monto="total_con_iva")
     """
     amount_dict = _calcular_monto_kushki(monto, tipo_monto, currency)
+    validate_amount(monto, "monto")
     logger.info(
         "[create_cash_charge] monto=%.2f tipo=%s → subtotalIva=%.2f iva=%.2f",
         monto, tipo_monto.value, amount_dict["subtotalIva"], amount_dict["iva"],
