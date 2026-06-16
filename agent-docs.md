@@ -33,8 +33,9 @@ Kushki exige un objeto detallado para el desglose de los montos sumados, no un v
 - **`create_card_token(card: dict, totalAmount: float, currency: str)`**:
   - Parámetro `card` requiere: `{ "name": "...", "number": "16_digitos", "expiryMonth": "MM", "expiryYear": "YY", "cvv": "123" }`.
   - Retorna un `token` (String) válido por 15 min.
-- **`create_card_charge(token: str, amount: dict, fullResponse: bool)`**:
-  - Utiliza el token creado anteriormente y el objeto `amount` para realizar el cobro.
+- **`create_card_charge(token: str, monto: float, tipo_monto: str, currency: str, fullResponse: bool)`**:
+  - Utiliza el token creado anteriormente y los parámetros `monto` + `tipo_monto` ("subtotal" | "total_con_iva") para realizar el cobro.
+  - El servidor calcula internamente el desglose `{subtotalIva, subtotalIva0, iva, ice, currency}`.
   - Retorna el `ticketNumber` (recibo) tras un cargo exitoso.
 
 ### 2. Anulaciones y Reembolsos
@@ -45,7 +46,7 @@ Kushki exige un objeto detallado para el desglose de los montos sumados, no un v
 ### 3. Pagos en Efectivo
 - **`create_cash_token(name: str, lastName: str, identification: str, email: str, totalAmount: float)`**:
   - Retorna un `token`. `identification` suele ser Cédula o RUC.
-- **`create_cash_charge(token: str, amount: dict)`**:
+- **`create_cash_charge(token: str, monto: float, tipo_monto: str, currency: str, fullResponse: bool)`**:
   - Genera un código PIN de pago. Retorna un `ticketNumber`, `pin` y `pdfUrl`.
 
 ### 4. Pagos por Transferencia (PSE)

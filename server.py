@@ -129,7 +129,13 @@ logger = logging.getLogger("kushki-mcp")
 # ─────────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────────
-KUSHKI_ENVIRONMENT: str = os.getenv("KUSHKI_ENVIRONMENT", "sandbox").lower()
+KUSHKI_ENVIRONMENT: str = os.getenv("KUSHKI_ENVIRONMENT", "production").lower()
+if KUSHKI_ENVIRONMENT not in ("sandbox", "production"):
+    raise ValueError(
+        f"KUSHKI_ENVIRONMENT inválido: {KUSHKI_ENVIRONMENT!r}. "
+        "Valores permitidos: 'sandbox' | 'production'. "
+        "Por seguridad, la variable DEBE estar explícitamente configurada en producción."
+    )
 
 BASE_URL = (
     "https://api.kushkipagos.com"
