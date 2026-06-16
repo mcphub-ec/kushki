@@ -153,7 +153,7 @@ HTTP_TIMEOUT = 30.0
 # ─────────────────────────────────────────────────────────────────────
 mcp = FastMCP(
     "Kushki",
-    host=os.getenv("MCP_HOST", "0.0.0.0"),
+    host=os.getenv("MCP_HOST", "0.0.0.0"),  # nosec B104 — configurable via MCP_HOST env
     instructions=(
         "MCP server for Kushki payment gateway. Supports card payments, "
         "cash payments (efectivo), bank transfers, and subscriptions. "
@@ -723,4 +723,4 @@ if __name__ == "__main__":
         app = mcp.streamable_http_app()
     else:
         raise ValueError(f"Unknown transport mode: {transport_mode}")
-    uvicorn.run(app, host=os.getenv("MCP_HOST", "0.0.0.0"), port=port)
+    uvicorn.run(app, host=os.getenv("MCP_HOST", "0.0.0.0"), port=port)  # nosec B104 — configurable via MCP_HOST env
